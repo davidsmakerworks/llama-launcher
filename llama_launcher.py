@@ -24,8 +24,6 @@ DEFAULT_CONFIG = {
     "llama_dir": "",
     "models_dir": "",
     "port": 8080,
-    "image_min_tokens": 256,
-    "image_max_tokens": 1024,
 }
 
 
@@ -46,6 +44,23 @@ def save_config(path, cfg):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Per-model parameter definitions
+# ---------------------------------------------------------------------------
+
+# (key, display label, cli flag)
+MODEL_PARAMS = [
+    ("temperature",      "Temperature",      "--temp"),
+    ("top_k",            "Top K",            "--top-k"),
+    ("top_p",            "Top P",            "--top-p"),
+    ("min_p",            "Min P",            "--min-p"),
+    ("presence_penalty", "Presence Penalty", "--presence-penalty"),
+    ("repeat_penalty",   "Repeat Penalty",   "--repeat-penalty"),
+    ("image_min_tokens", "Image Min Tokens", "--image-min-tokens"),
+    ("image_max_tokens", "Image Max Tokens", "--image-max-tokens"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +167,55 @@ class ModelItem(wx.Panel):
 
 
 # ---------------------------------------------------------------------------
+# Model settings dialog
+# ---------------------------------------------------------------------------
+
+class ModelSettingsDialog(wx.Dialog):
+    """Per-model parameter settings (checkbox + value for each param)."""
+
+    def __init__(self, parent, folder_name, model_settings):
+        super().__init__(parent, title=f"Model Settings — {folder_name}",
+                         style=wx.DEFAULT_DIALOG_STYLE)
+        # model_settings: dict keyed by param key -> {"enabled": bool, "value": str}
+        self._settings = {k: dict(v) for k, v in model_settings.items()}
+        self._rows = {}   # key -> (CheckBox, TextCtrl)
+        self._build_ui()
+        self.Fit()
+
+    def _build_ui(self):
+        main = wx.BoxSizer(wx.VERTICAL)
+
+        grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=10)
+        grid.AddGrowableCol(1, 1)
+
+        for key, label, _flag in MODEL_PARAMS:
+            s = self._settings.get(key, {"enabled": False, "value": ""})
+            chk = wx.CheckBox(self, label=label)
+            chk.SetValue(s.get("enabled", False))
+            txt = wx.TextCtrl(self, value=s.get("value", ""),
+                              size=wx.Size(60, -1))
+            txt.SetMaxLength(4)
+            grid.Add(chk, 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(txt, 0, wx.ALIGN_CENTER_VERTICAL)
+            self._rows[key] = (chk, txt)
+
+        main.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
+        main.Add(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0,
+                 wx.EXPAND | wx.ALL, 8)
+        self.SetSizer(main)
+
+    def get_settings(self):
+        result = {}
+        for key, _label, _flag in MODEL_PARAMS:
+            chk, txt = self._rows[key]
+            result[key] = {
+                "enabled": chk.GetValue(),
+                "value":   txt.GetValue().strip(),
+            }
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Settings dialog
 # ---------------------------------------------------------------------------
 
@@ -160,7 +224,7 @@ class SettingsDialog(wx.Dialog):
         super().__init__(parent, title="Settings", style=wx.DEFAULT_DIALOG_STYLE)
         self.cfg = dict(cfg)
         self._build_ui()
-        self.SetMinSize((540, 300))
+        self.SetMinSize((540, 240))
         self.Fit()
 
     def _make_dir_row(self, sizer, label, attr):
@@ -196,10 +260,7 @@ class SettingsDialog(wx.Dialog):
 
         self._llama_dir_ctrl  = self._make_dir_row(grid, "llama.cpp directory:", "llama_dir")
         self._models_dir_ctrl = self._make_dir_row(grid, "Models directory:",    "models_dir")
-
-        self._port_spin             = self._make_spin_row(grid, "Port:",             "port",             1, 65535)
-        self._image_min_tokens_spin = self._make_spin_row(grid, "image-min-tokens:", "image_min_tokens", 1, 99999)
-        self._image_max_tokens_spin = self._make_spin_row(grid, "image-max-tokens:", "image_max_tokens", 1, 99999)
+        self._port_spin       = self._make_spin_row(grid, "Port:",               "port", 1, 65535)
 
         main.Add(grid, 1, wx.EXPAND | wx.ALL, 8)
         main.Add(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0,
@@ -207,11 +268,9 @@ class SettingsDialog(wx.Dialog):
         self.SetSizer(main)
 
     def get_config(self):
-        self.cfg["llama_dir"]        = self._llama_dir_ctrl.GetValue().strip()
-        self.cfg["models_dir"]       = self._models_dir_ctrl.GetValue().strip()
-        self.cfg["port"]             = self._port_spin.GetValue()
-        self.cfg["image_min_tokens"] = self._image_min_tokens_spin.GetValue()
-        self.cfg["image_max_tokens"] = self._image_max_tokens_spin.GetValue()
+        self.cfg["llama_dir"]  = self._llama_dir_ctrl.GetValue().strip()
+        self.cfg["models_dir"] = self._models_dir_ctrl.GetValue().strip()
+        self.cfg["port"]       = self._port_spin.GetValue()
         return self.cfg
 
 
@@ -272,14 +331,21 @@ class LlamaLauncherFrame(wx.Frame):
                                         size=(-1, 60))
         vbox.Add(self._cmd_preview, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
-        # --- Launch button --------------------------------------------
+        # --- Bottom button row ----------------------------------------
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+
+        self._model_settings_btn = wx.Button(panel, label="Model Settings…")
+        self._model_settings_btn.Disable()
+        self._model_settings_btn.Bind(wx.EVT_BUTTON, self._on_model_settings)
+        btn_row.Add(self._model_settings_btn, 0, wx.RIGHT, 12)
+
         self._launch_btn = wx.Button(panel, label="Launch llama-server")
-        self._launch_btn.SetFont(
-            self._launch_btn.GetFont().Bold()
-        )
+        self._launch_btn.SetFont(self._launch_btn.GetFont().Bold())
         self._launch_btn.Disable()
         self._launch_btn.Bind(wx.EVT_BUTTON, self._on_launch)
-        vbox.Add(self._launch_btn, 0, wx.ALIGN_CENTER | wx.BOTTOM, 12)
+        btn_row.Add(self._launch_btn, 0)
+
+        vbox.Add(btn_row, 0, wx.ALIGN_CENTER | wx.BOTTOM, 12)
 
         panel.SetSizer(vbox)
 
@@ -298,6 +364,7 @@ class LlamaLauncherFrame(wx.Frame):
         self._list_sizer.Clear()
         self.selected_item = None
         self._launch_btn.Disable()
+        self._model_settings_btn.Disable()
         self._cmd_preview.SetValue("")
 
         models_dir = self.cfg.get("models_dir", "")
@@ -340,16 +407,30 @@ class LlamaLauncherFrame(wx.Frame):
 
         if item.model_info.valid:
             self._launch_btn.Enable()
-            self._cmd_preview.SetValue(self._build_command(item.model_info))
+            self._model_settings_btn.Enable()
+            self._cmd_preview.SetValue(self._build_command(item.folder_name, item.model_info))
         else:
             self._launch_btn.Disable()
+            self._model_settings_btn.Enable()  # can still configure settings for invalid models
             self._cmd_preview.SetValue(f"Invalid model folder: {item.model_info.error}")
+
+    # ------------------------------------------------------------------
+    # Per-model settings helpers
+    # ------------------------------------------------------------------
+
+    def _get_model_settings(self, folder_name):
+        """Return the stored settings dict for a model folder (may be empty)."""
+        return self.cfg.setdefault("model_settings", {}).get(folder_name, {})
+
+    def _set_model_settings(self, folder_name, settings):
+        self.cfg.setdefault("model_settings", {})[folder_name] = settings
+        save_config(self.config_path, self.cfg)
 
     # ------------------------------------------------------------------
     # Command building
     # ------------------------------------------------------------------
 
-    def _build_command(self, model_info):
+    def _build_command(self, folder_name, model_info):
         llama_dir = self.cfg.get("llama_dir", "")
         exe = os.path.join(llama_dir, "llama-server.exe") if llama_dir else "llama-server.exe"
 
@@ -357,9 +438,14 @@ class LlamaLauncherFrame(wx.Frame):
             exe,
             "-m", model_info.model_file,
             "--port", str(self.cfg.get("port", 8080)),
-            "--image-min-tokens", str(self.cfg.get("image_min_tokens", 256)),
-            "--image-max-tokens", str(self.cfg.get("image_max_tokens", 1024)),
         ]
+
+        model_settings = self._get_model_settings(folder_name)
+        for key, _label, flag in MODEL_PARAMS:
+            s = model_settings.get(key, {})
+            if s.get("enabled") and s.get("value", "").strip():
+                parts += [flag, s["value"].strip()]
+
         if model_info.mmproj_file:
             parts += ["--mmproj", model_info.mmproj_file]
 
@@ -386,6 +472,21 @@ class LlamaLauncherFrame(wx.Frame):
             save_config(self.config_path, self.cfg)
             self._models_dir_ctrl.SetValue(self.cfg.get("models_dir", ""))
             self._refresh_model_list()
+        dlg.Destroy()
+
+    def _on_model_settings(self, _evt):
+        if not self.selected_item:
+            return
+        folder_name = self.selected_item.folder_name
+        current = self._get_model_settings(folder_name)
+        dlg = ModelSettingsDialog(self, folder_name, current)
+        if dlg.ShowModal() == wx.ID_OK:
+            self._set_model_settings(folder_name, dlg.get_settings())
+            # Refresh command preview if the selected model is valid
+            if self.selected_item.model_info.valid:
+                self._cmd_preview.SetValue(
+                    self._build_command(folder_name, self.selected_item.model_info)
+                )
         dlg.Destroy()
 
     def _port_in_use(self, port):
@@ -421,12 +522,18 @@ class LlamaLauncherFrame(wx.Frame):
             return
 
         try:
-            model_info = self.selected_item.model_info
+            folder_name = self.selected_item.folder_name
+            model_info  = self.selected_item.model_info
             args = [exe,
                     "-m", model_info.model_file,
-                    "--port", str(port),
-                    "--image-min-tokens", str(self.cfg.get("image_min_tokens", 256)),
-                    "--image-max-tokens", str(self.cfg.get("image_max_tokens", 1024))]
+                    "--port", str(port)]
+
+            model_settings = self._get_model_settings(folder_name)
+            for key, _label, flag in MODEL_PARAMS:
+                s = model_settings.get(key, {})
+                if s.get("enabled") and s.get("value", "").strip():
+                    args += [flag, s["value"].strip()]
+
             if model_info.mmproj_file:
                 args += ["--mmproj", model_info.mmproj_file]
 
