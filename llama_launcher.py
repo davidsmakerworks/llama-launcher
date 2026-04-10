@@ -52,6 +52,7 @@ def save_config(path, cfg):
 
 # (key, display label, cli flag)
 MODEL_PARAMS = [
+    ("ctx_size",         "Context Size",     "--ctx-size"),
     ("temperature",      "Temperature",      "--temp"),
     ("top_k",            "Top K",            "--top-k"),
     ("top_p",            "Top P",            "--top-p"),
@@ -201,7 +202,7 @@ class ModelSettingsDialog(wx.Dialog):
             chk.SetValue(s.get("enabled", False))
             txt = wx.TextCtrl(self, value=s.get("value", ""),
                               size=wx.Size(60, -1))
-            txt.SetMaxLength(4)
+            txt.SetMaxLength(8)
             grid.Add(chk, 0, wx.ALIGN_CENTER_VERTICAL)
             grid.Add(txt, 0, wx.ALIGN_CENTER_VERTICAL)
             self._rows[key] = (chk, txt)
