@@ -120,11 +120,12 @@ COLOR_SELECTED_INVALID = wx.Colour(200, 100, 100)
 
 
 class ModelItem(wx.Panel):
-    def __init__(self, parent, folder_name, model_info, on_select_cb):
+    def __init__(self, parent, folder_name, model_info, on_select_cb, on_double_click_cb=None):
         super().__init__(parent, style=wx.BORDER_SIMPLE)
         self.folder_name = folder_name
         self.model_info  = model_info
         self.on_select_cb = on_select_cb
+        self.on_double_click_cb = on_double_click_cb
         self.selected = False
 
         self._base_color = COLOR_VALID if model_info.valid else COLOR_INVALID
@@ -152,9 +153,15 @@ class ModelItem(wx.Panel):
         # Bind clicks on panel and children
         for widget in (self, name_lbl, detail_lbl):
             widget.Bind(wx.EVT_LEFT_DOWN, self._on_click)
+            widget.Bind(wx.EVT_LEFT_DCLICK, self._on_double_click)
 
     def _on_click(self, _evt):
         self.on_select_cb(self)
+
+    def _on_double_click(self, _evt):
+        self.on_select_cb(self)
+        if self.on_double_click_cb:
+            self.on_double_click_cb(self)
 
     def set_selected(self, selected):
         self.selected = selected
@@ -393,7 +400,7 @@ class LlamaLauncherFrame(wx.Frame):
             for fname in folders:
                 fpath = os.path.join(models_dir, fname)
                 info  = ModelInfo(fpath)
-                item  = ModelItem(self._scroll, fname, info, self._on_item_selected)
+                item  = ModelItem(self._scroll, fname, info, self._on_item_selected, self._on_launch)
                 self._list_sizer.Add(item, 0, wx.EXPAND | wx.ALL, 3)
 
         self._scroll.Layout()
