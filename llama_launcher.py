@@ -52,8 +52,9 @@ def save_config(path, cfg):
 
 # (key, display label, cli flag)
 MODEL_PARAMS = [
-    ("ctx_size",         "Context Size",     "--ctx-size"),
-    ("temperature",      "Temperature",      "--temp"),
+    ("ctx_size",          "Context Size",      "--ctx-size"),
+    ("reasoning_budget",  "Reasoning Budget",  "--reasoning-budget"),
+    ("temperature",       "Temperature",       "--temp"),
     ("top_k",            "Top K",            "--top-k"),
     ("top_p",            "Top P",            "--top-p"),
     ("min_p",            "Min P",            "--min-p"),
