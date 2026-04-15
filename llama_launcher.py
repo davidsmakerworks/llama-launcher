@@ -1,11 +1,14 @@
 import wx
 import wx.lib.scrolledpanel as scrolled
 import os
+import sys
 import json
 import subprocess
 import argparse
 import urllib.request
 import urllib.error
+
+_SERVER_BIN = "llama-server.exe" if sys.platform == "win32" else "llama-server"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,9 +53,11 @@ def save_config(path, cfg):
 # Per-model parameter definitions
 # ---------------------------------------------------------------------------
 
-# (key, display label, cli flag)
+# (key, display label, cli flag[, choices])
+# Entries with a choices list render as a drop-down; others render as a text field.
 MODEL_PARAMS = [
     ("ctx_size",          "Context Size",      "--ctx-size"),
+    ("reasoning",         "Reasoning",         "--reasoning",       ["Auto", "On", "Off"]),
     ("reasoning_budget",  "Reasoning Budget",  "--reasoning-budget"),
     ("temperature",       "Temperature",       "--temp"),
     ("top_k",            "Top K",            "--top-k"),
@@ -179,6 +184,128 @@ class ModelItem(wx.Panel):
 # Model settings dialog
 # ---------------------------------------------------------------------------
 
+_CT_TYPES = ["string", "boolean", "integer", "float"]
+
+
+def _coerce_ct_value(pair):
+    """Convert a pair's string value to the correct Python type for JSON serialization."""
+    t = pair.get("type", "string")
+    v = pair.get("value", "")
+    if t == "boolean":
+        return v.lower() != "false"
+    if t == "integer":
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return v
+    if t == "float":
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return v
+    return v  # string
+
+
+class ChatTemplateKwargsDialog(wx.Dialog):
+    """Editor for an arbitrary list of key/value pairs passed as a JSON object
+    to --chat-template-kwargs."""
+
+    def __init__(self, parent, pairs):
+        super().__init__(parent, title="Chat Template Kwargs",
+                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        # pairs: list of {"key": str, "type": str, "value": str}
+        self._pair_rows = []  # (key_ctrl, type_ctrl, val_ctrl, bool_ctrl, remove_btn, row_sizer)
+        self._build_ui(pairs)
+        self.Fit()
+        self.SetMinSize(self.GetSize())
+
+    def _build_ui(self, initial_pairs):
+        main = wx.BoxSizer(wx.VERTICAL)
+
+        hdr = wx.BoxSizer(wx.HORIZONTAL)
+        hdr.Add(wx.StaticText(self, label="Key"),   0, wx.RIGHT, 74)
+        hdr.Add(wx.StaticText(self, label="Type"),  0, wx.RIGHT, 60)
+        hdr.Add(wx.StaticText(self, label="Value"), 0)
+        main.Add(hdr, 0, wx.LEFT | wx.TOP, 12)
+
+        self._pairs_sizer = wx.BoxSizer(wx.VERTICAL)
+        main.Add(self._pairs_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+
+        add_btn = wx.Button(self, label="Add Pair")
+        add_btn.Bind(wx.EVT_BUTTON, lambda _evt: self._add_row())
+        main.Add(add_btn, 0, wx.LEFT | wx.TOP, 12)
+
+        main.Add(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0,
+                 wx.EXPAND | wx.ALL, 8)
+        self.SetSizer(main)
+
+        for pair in initial_pairs:
+            self._add_row(pair.get("key", ""),
+                          pair.get("type", "string"),
+                          pair.get("value", ""))
+
+    def _add_row(self, key="", type_="string", value=""):
+        row_sizer  = wx.BoxSizer(wx.HORIZONTAL)
+        key_ctrl   = wx.TextCtrl(self, value=key,   size=wx.Size(120, -1))
+        type_ctrl  = wx.Choice(self, choices=_CT_TYPES, size=wx.Size(80, -1))
+        val_ctrl   = wx.TextCtrl(self, value=value, size=wx.Size(160, -1))
+        bool_ctrl  = wx.Choice(self, choices=["true", "false"], size=wx.Size(160, -1))
+        remove_btn = wx.Button(self, label="X",     size=wx.Size(28, -1))
+
+        # Initialise type selection and value controls
+        type_idx = _CT_TYPES.index(type_) if type_ in _CT_TYPES else 0
+        type_ctrl.SetSelection(type_idx)
+        is_bool = (type_ == "boolean")
+        if is_bool:
+            bool_ctrl.SetSelection(0 if value.lower() != "false" else 1)
+        val_ctrl.Show(not is_bool)
+        bool_ctrl.Show(is_bool)
+
+        row_sizer.Add(key_ctrl,   0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        row_sizer.Add(type_ctrl,  0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        row_sizer.Add(val_ctrl,   0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        row_sizer.Add(bool_ctrl,  0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        row_sizer.Add(remove_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        self._pairs_sizer.Add(row_sizer, 0, wx.BOTTOM, 3)
+        row_data = (key_ctrl, type_ctrl, val_ctrl, bool_ctrl, remove_btn, row_sizer)
+        self._pair_rows.append(row_data)
+
+        def on_type_change(_evt, vc=val_ctrl, bc=bool_ctrl, rs=row_sizer):
+            now_bool = type_ctrl.GetStringSelection() == "boolean"
+            vc.Show(not now_bool)
+            bc.Show(now_bool)
+            rs.Layout()
+            self._pairs_sizer.Layout()
+            self.Layout()
+
+        type_ctrl.Bind(wx.EVT_CHOICE, on_type_change)
+        remove_btn.Bind(wx.EVT_BUTTON,
+                        lambda _evt, rd=row_data: self._remove_row(rd))
+        self.Layout()
+        self.Fit()
+
+    def _remove_row(self, row_data):
+        key_ctrl, type_ctrl, val_ctrl, bool_ctrl, remove_btn, row_sizer = row_data
+        self._pair_rows.remove(row_data)
+        for widget in (key_ctrl, type_ctrl, val_ctrl, bool_ctrl, remove_btn):
+            widget.Destroy()
+        self._pairs_sizer.Remove(row_sizer)
+        self.Layout()
+        self.Fit()
+
+    def get_pairs(self):
+        pairs = []
+        for key_ctrl, type_ctrl, val_ctrl, bool_ctrl, _btn, _sizer in self._pair_rows:
+            k = key_ctrl.GetValue().strip()
+            t = type_ctrl.GetStringSelection()
+            v = (bool_ctrl.GetStringSelection()
+                 if t == "boolean" else val_ctrl.GetValue().strip())
+            if k:
+                pairs.append({"key": k, "type": t, "value": v})
+        return pairs
+
+
 class ModelSettingsDialog(wx.Dialog):
     """Per-model parameter settings (checkbox + value for each param)."""
 
@@ -188,6 +315,9 @@ class ModelSettingsDialog(wx.Dialog):
         # model_settings: dict keyed by param key -> {"enabled": bool, "value": str}
         self._settings = {k: dict(v) for k, v in model_settings.items()}
         self._rows = {}   # key -> (CheckBox, TextCtrl)
+        self._ct_pairs = list(
+            self._settings.get("chat_template_kwargs", {}).get("pairs", [])
+        )
         self._build_ui()
         self.Fit()
 
@@ -197,30 +327,76 @@ class ModelSettingsDialog(wx.Dialog):
         grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=10)
         grid.AddGrowableCol(1, 1)
 
-        for key, label, _flag in MODEL_PARAMS:
+        for key, label, _flag, *rest in MODEL_PARAMS:
+            choices = rest[0] if rest else None
             s = self._settings.get(key, {"enabled": False, "value": ""})
+            enabled = s.get("enabled", False)
             chk = wx.CheckBox(self, label=label)
-            chk.SetValue(s.get("enabled", False))
-            txt = wx.TextCtrl(self, value=s.get("value", ""),
-                              size=wx.Size(60, -1))
-            txt.SetMaxLength(8)
+            chk.SetValue(enabled)
+            if choices:
+                ctrl = wx.Choice(self, choices=choices)
+                saved = s.get("value", "").lower()
+                idx = next((i for i, c in enumerate(choices) if c.lower() == saved), 0)
+                ctrl.SetSelection(idx)
+            else:
+                ctrl = wx.TextCtrl(self, value=s.get("value", ""),
+                                   size=wx.Size(60, -1))
+                ctrl.SetMaxLength(8)
+            ctrl.Enable(enabled)
             grid.Add(chk, 0, wx.ALIGN_CENTER_VERTICAL)
-            grid.Add(txt, 0, wx.ALIGN_CENTER_VERTICAL)
-            self._rows[key] = (chk, txt)
+            grid.Add(ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+            self._rows[key] = (chk, ctrl, choices)
+            chk.Bind(wx.EVT_CHECKBOX, lambda evt, c=ctrl: c.Enable(evt.IsChecked()))
 
         main.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
+
+        # --- Chat Template Kwargs row ------------------------------------
+        ct_row = wx.BoxSizer(wx.HORIZONTAL)
+        self._ct_chk = wx.CheckBox(self, label="Chat Template Kwargs")
+        self._ct_chk.SetValue(
+            self._settings.get("chat_template_kwargs", {}).get("enabled", False)
+        )
+        ct_row.Add(self._ct_chk, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        n = len(self._ct_pairs)
+        self._ct_summary = wx.StaticText(
+            self, label=f"{n} pair(s)" if n else "(none)"
+        )
+        ct_row.Add(self._ct_summary, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        edit_ct_btn = wx.Button(self, label="Edit...")
+        edit_ct_btn.Bind(wx.EVT_BUTTON, self._on_edit_ct_kwargs)
+        ct_row.Add(edit_ct_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        main.Add(ct_row, 0, wx.LEFT | wx.BOTTOM, 12)
+
         main.Add(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0,
                  wx.EXPAND | wx.ALL, 8)
         self.SetSizer(main)
 
+    def _on_edit_ct_kwargs(self, _evt):
+        dlg = ChatTemplateKwargsDialog(self, self._ct_pairs)
+        if dlg.ShowModal() == wx.ID_OK:
+            self._ct_pairs = dlg.get_pairs()
+            n = len(self._ct_pairs)
+            self._ct_summary.SetLabel(f"{n} pair(s)" if n else "(none)")
+        dlg.Destroy()
+
     def get_settings(self):
         result = {}
-        for key, _label, _flag in MODEL_PARAMS:
-            chk, txt = self._rows[key]
+        for key, _label, _flag, *rest in MODEL_PARAMS:
+            choices = rest[0] if rest else None
+            chk, ctrl, _ = self._rows[key]
+            if choices:
+                idx = ctrl.GetSelection()
+                val = choices[idx].lower() if idx != wx.NOT_FOUND else ""
+            else:
+                val = ctrl.GetValue().strip()
             result[key] = {
                 "enabled": chk.GetValue(),
-                "value":   txt.GetValue().strip(),
+                "value":   val,
             }
+        result["chat_template_kwargs"] = {
+            "enabled": self._ct_chk.GetValue(),
+            "pairs":   self._ct_pairs,
+        }
         return result
 
 
@@ -441,7 +617,7 @@ class LlamaLauncherFrame(wx.Frame):
 
     def _build_command(self, folder_name, model_info):
         llama_dir = self.cfg.get("llama_dir", "")
-        exe = os.path.join(llama_dir, "llama-server.exe") if llama_dir else "llama-server.exe"
+        exe = os.path.join(llama_dir, _SERVER_BIN) if llama_dir else _SERVER_BIN
 
         parts = [
             exe,
@@ -450,15 +626,27 @@ class LlamaLauncherFrame(wx.Frame):
         ]
 
         model_settings = self._get_model_settings(folder_name)
-        for key, _label, flag in MODEL_PARAMS:
+        for key, _label, flag, *_ in MODEL_PARAMS:
             s = model_settings.get(key, {})
             if s.get("enabled") and s.get("value", "").strip():
                 parts += [flag, s["value"].strip()]
 
+        ct = model_settings.get("chat_template_kwargs", {})
+        if ct.get("enabled") and ct.get("pairs"):
+            obj = {p["key"]: _coerce_ct_value(p) for p in ct["pairs"] if p.get("key")}
+            if obj:
+                parts += ["--chat-template-kwargs", json.dumps(obj, separators=(",", ":"))]
+
         if model_info.mmproj_file:
             parts += ["--mmproj", model_info.mmproj_file]
 
-        return " ".join(f'"{p}"' if " " in str(p) else str(p) for p in parts)
+        def _quote(s):
+            s = str(s)
+            if any(c in s for c in (' ', '"', '{', '}')):
+                return '"' + s.replace('"', '\\"') + '"'
+            return s
+
+        return " ".join(_quote(p) for p in parts)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -521,32 +709,41 @@ class LlamaLauncherFrame(wx.Frame):
             return
 
         llama_dir = self.cfg.get("llama_dir", "")
-        exe = os.path.join(llama_dir, "llama-server.exe") if llama_dir else "llama-server.exe"
-        if not os.path.isfile(exe):
+        server_binary = os.path.join(llama_dir, _SERVER_BIN) if llama_dir else _SERVER_BIN
+        if not os.path.isfile(server_binary):
             wx.MessageBox(
-                f"llama-server.exe not found at:\n{exe}\n\n"
+                f"{_SERVER_BIN} not found at:\n{server_binary}\n\n"
                 "Please set the llama.cpp directory in Settings.",
-                "Executable not found", wx.OK | wx.ICON_ERROR, self
+                "Binary not found", wx.OK | wx.ICON_ERROR, self
             )
             return
 
         try:
             folder_name = self.selected_item.folder_name
             model_info  = self.selected_item.model_info
-            args = [exe,
+            args = [server_binary,
                     "-m", model_info.model_file,
                     "--port", str(port)]
 
             model_settings = self._get_model_settings(folder_name)
-            for key, _label, flag in MODEL_PARAMS:
+            for key, _label, flag, *_ in MODEL_PARAMS:
                 s = model_settings.get(key, {})
                 if s.get("enabled") and s.get("value", "").strip():
                     args += [flag, s["value"].strip()]
 
+            ct = model_settings.get("chat_template_kwargs", {})
+            if ct.get("enabled") and ct.get("pairs"):
+                obj = {p["key"]: _coerce_ct_value(p) for p in ct["pairs"] if p.get("key")}
+                if obj:
+                    args += ["--chat-template-kwargs", json.dumps(obj, separators=(",", ":"))]
+
             if model_info.mmproj_file:
                 args += ["--mmproj", model_info.mmproj_file]
 
-            subprocess.Popen(args, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            if sys.platform == "win32":
+                subprocess.Popen(args, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            else:
+                subprocess.Popen(args)
         except Exception as exc:
             wx.MessageBox(f"Failed to launch llama-server:\n{exc}",
                           "Error", wx.OK | wx.ICON_ERROR, self)
