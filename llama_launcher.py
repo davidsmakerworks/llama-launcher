@@ -24,6 +24,8 @@ DEFAULT_CONFIG = {
     "llama_dir": "",
     "models_dir": "",
     "port": 8080,
+    "listen_all_interfaces": False,
+    "server_slots": -1,
 }
 
 
@@ -270,15 +272,45 @@ class SettingsDialog(wx.Dialog):
         self._models_dir_ctrl = self._make_dir_row(grid, "Models directory:",    "models_dir")
         self._port_spin       = self._make_spin_row(grid, "Port:",               "port", 1, 65535)
 
+        slots_row = wx.BoxSizer(wx.HORIZONTAL)
+        slots_lbl = wx.StaticText(self, label="Server Slots:", size=wx.Size(160, -1))
+        initial_slots = self.cfg.get("server_slots", -1)
+        self._slots_spin = wx.SpinCtrl(self, value=str(initial_slots),
+                                       min=-1, max=9999, size=wx.Size(100, -1))
+        slots_row.Add(slots_lbl,        0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        slots_row.Add(self._slots_spin, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(slots_row, 0, wx.ALL, 6)
+
+        self._slots_prev = initial_slots
+
+        def _on_slots_spin(_evt):
+            val = self._slots_spin.GetValue()
+            if val == 0:
+                new = 1 if self._slots_prev == -1 else -1
+                self._slots_spin.SetValue(new)
+                self._slots_prev = new
+            else:
+                self._slots_prev = val
+
+        self._slots_spin.Bind(wx.EVT_SPINCTRL, _on_slots_spin)
+
+        chk_row = wx.BoxSizer(wx.HORIZONTAL)
+        self._listen_all_chk = wx.CheckBox(self, label="Listen on all interfaces")
+        self._listen_all_chk.SetValue(bool(self.cfg.get("listen_all_interfaces", False)))
+        chk_row.Add(self._listen_all_chk, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(chk_row, 0, wx.ALL, 6)
+
         main.Add(grid, 1, wx.EXPAND | wx.ALL, 8)
         main.Add(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), 0,
                  wx.EXPAND | wx.ALL, 8)
         self.SetSizer(main)
 
     def get_config(self):
-        self.cfg["llama_dir"]  = self._llama_dir_ctrl.GetValue().strip()
-        self.cfg["models_dir"] = self._models_dir_ctrl.GetValue().strip()
-        self.cfg["port"]       = self._port_spin.GetValue()
+        self.cfg["llama_dir"]             = self._llama_dir_ctrl.GetValue().strip()
+        self.cfg["models_dir"]            = self._models_dir_ctrl.GetValue().strip()
+        self.cfg["port"]                  = self._port_spin.GetValue()
+        self.cfg["server_slots"]          = self._slots_spin.GetValue()
+        self.cfg["listen_all_interfaces"] = self._listen_all_chk.GetValue()
         return self.cfg
 
 
@@ -448,6 +480,13 @@ class LlamaLauncherFrame(wx.Frame):
             "--port", str(self.cfg.get("port", 8080)),
         ]
 
+        if self.cfg.get("listen_all_interfaces"):
+            parts += ["--host", "0.0.0.0"]
+
+        slots = self.cfg.get("server_slots", -1)
+        if slots != -1:
+            parts += ["--parallel", str(slots)]
+
         model_settings = self._get_model_settings(folder_name)
         for key, _label, flag in MODEL_PARAMS:
             s = model_settings.get(key, {})
@@ -535,6 +574,13 @@ class LlamaLauncherFrame(wx.Frame):
             args = [exe,
                     "-m", model_info.model_file,
                     "--port", str(port)]
+
+            if self.cfg.get("listen_all_interfaces"):
+                args += ["--host", "0.0.0.0"]
+
+            slots = self.cfg.get("server_slots", -1)
+            if slots != -1:
+                args += ["--parallel", str(slots)]
 
             model_settings = self._get_model_settings(folder_name)
             for key, _label, flag in MODEL_PARAMS:
